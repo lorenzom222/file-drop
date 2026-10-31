@@ -19,7 +19,7 @@ import (
 	"time"
 )
 
-//go:embed ui/index.html ui/style.css ui/dist/app.js ui/fonts/jetbrains-mono.woff2 ui/fonts/OFL.txt
+//go:embed ui/index.html ui/owner.html ui/style.css ui/dist/app.js ui/dist/owner.js ui/fonts/jetbrains-mono.woff2 ui/fonts/OFL.txt
 var assets embed.FS
 
 const cookieName = "filedrop_session"
@@ -38,6 +38,11 @@ type app struct {
 	viewInvitation     string
 	downloadInvitation string
 	inviteEnd          time.Time
+	invitations        map[string]invitation
+	ownerBootstrap     string
+	ownerBootstrapEnd  time.Time
+	ownerCredential    string
+	ownerEnd           time.Time
 	mu                 sync.Mutex
 	sessions           map[string]uploadSession
 	now                func() time.Time
@@ -53,7 +58,42 @@ func newApp(c config, s *store, ctx context.Context) *app {
 	if c.AllowDownloads {
 		a.downloadInvitation = randomID()
 	}
+	a.invitations = map[string]invitation{"upload": {token: a.invitation, expiresAt: a.inviteEnd}}
+	if c.ShareInbox {
+		a.invitations["view"] = invitation{token: a.viewInvitation, expiresAt: a.inviteEnd, viewInbox: true}
+	}
+	if c.AllowDownloads {
+		a.invitations["download"] = invitation{token: a.downloadInvitation, expiresAt: a.inviteEnd, viewInbox: true, canDownload: true}
+	}
+	if c.OwnerListen != "" {
+		a.ownerBootstrap = randomID()
+		a.ownerBootstrapEnd = time.Now().Add(10 * time.Minute)
+	}
 	return a
+}
+
+func assetHandler(path string) http.HandlerFunc {
+	data, err := assets.ReadFile(path)
+	if err != nil {
+		panic(err)
+	}
+	return func(w http.ResponseWriter, r *http.Request) {
+		switch filepath.Ext(path) {
+		case ".html":
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		case ".css":
+			w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		case ".woff2":
+			w.Header().Set("Content-Type", "font/woff2")
+		case ".txt":
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		default:
+			w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		}
+		if _, err := w.Write(data); err != nil {
+			slog.Warn("could not deliver frontend asset", "error", err)
+		}
+	}
 }
 
 func writeError(w http.ResponseWriter, status int, code, message string) {
@@ -73,27 +113,7 @@ func (a *app) handler() http.Handler {
 		"GET /fonts/jetbrains-mono.woff2": "ui/fonts/jetbrains-mono.woff2",
 		"GET /fonts/OFL.txt":              "ui/fonts/OFL.txt",
 	} {
-		data, err := assets.ReadFile(path)
-		if err != nil {
-			panic(err)
-		}
-		mux.HandleFunc(route, func(w http.ResponseWriter, r *http.Request) {
-			switch filepath.Ext(path) {
-			case ".html":
-				w.Header().Set("Content-Type", "text/html; charset=utf-8")
-			case ".css":
-				w.Header().Set("Content-Type", "text/css; charset=utf-8")
-			case ".woff2":
-				w.Header().Set("Content-Type", "font/woff2")
-			case ".txt":
-				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			default:
-				w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
-			}
-			if _, err := w.Write(data); err != nil {
-				slog.Warn("could not deliver frontend asset", "error", err)
-			}
-		})
+		mux.HandleFunc(route, assetHandler(path))
 	}
 	mux.HandleFunc("POST /api/session", a.session)
 	mux.HandleFunc("POST /api/uploads", a.upload)
@@ -167,10 +187,14 @@ func (a *app) session(w http.ResponseWriter, r *http.Request) {
 			delete(a.sessions, token)
 		}
 	}
-	canDownload := a.cfg.AllowDownloads && subtle.ConstantTimeCompare([]byte(request.Invitation), []byte(a.downloadInvitation)) == 1
-	viewInbox := canDownload || (a.cfg.ShareInbox && subtle.ConstantTimeCompare([]byte(request.Invitation), []byte(a.viewInvitation)) == 1)
-	canUpload := subtle.ConstantTimeCompare([]byte(request.Invitation), []byte(a.invitation)) == 1
-	if a.ctx.Err() != nil || !now.Before(a.inviteEnd) || (!canUpload && !viewInbox) {
+	var selected invitation
+	valid := false
+	for _, invite := range a.invitations {
+		if subtle.ConstantTimeCompare([]byte(request.Invitation), []byte(invite.token)) == 1 && now.Before(invite.expiresAt) {
+			selected, valid = invite, true
+		}
+	}
+	if a.ctx.Err() != nil || !valid {
 		writeError(w, 401, "invitation", "Invitation is invalid or expired. Ask the receiver for a new link.")
 		return
 	}
@@ -183,10 +207,10 @@ func (a *app) session(w http.ResponseWriter, r *http.Request) {
 	}
 	token := randomID()
 	end := now.Add(30 * time.Minute)
-	a.sessions[token] = uploadSession{expiresAt: end, viewInbox: viewInbox, canDownload: canDownload, offerKey: randomID()}
+	a.sessions[token] = uploadSession{expiresAt: end, viewInbox: selected.viewInbox, canDownload: selected.canDownload, offerKey: randomID()}
 	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: token, Path: "/", HttpOnly: true, Secure: !a.cfg.DevHTTP, SameSite: http.SameSiteStrictMode, MaxAge: 1800})
 	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]any{"expires_at": end, "max_file_bytes": a.cfg.FileLimit, "can_view_inbox": viewInbox, "can_download": canDownload}); err != nil {
+	if err := json.NewEncoder(w).Encode(map[string]any{"expires_at": end, "max_file_bytes": a.cfg.FileLimit, "can_view_inbox": selected.viewInbox, "can_download": selected.canDownload}); err != nil {
 		slog.Warn("could not deliver session response", "error", err)
 	}
 }

@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>File Drop - Link device</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/owner.js"></script>
+</head>
+<body>
+  <main>
+    <header class="page-header">
+      <h1>File Drop</h1>
+      <p id="owner-status" role="status">Open the owner link from the terminal.</p>
+    </header>
+    <section id="owner-panel" aria-label="Link device" hidden>
+      <h2>Link device</h2>
+      <label for="permission">Access</label>
+      <select id="permission">
+        <option value="upload">Upload only</option>
+        <option value="view" disabled>Upload and view inbox</option>
+        <option value="download" disabled>Upload, view and download</option>
+      </select>
+      <p class="muted owner-description">Temporary access, not permanent pairing. Links last 10 minutes; guest sessions last 30 minutes.</p>
+      <p id="access-description" class="muted">This link only permits uploads.</p>
+      <button id="link-device">Create link</button>
+      <div id="invitation-panel" hidden>
+        <label for="invitation-url">Invitation</label>
+        <input id="invitation-url" type="text" readonly spellcheck="false">
+        <p id="invitation-status" class="muted" role="status"></p>
+        <div class="owner-actions">
+          <button id="copy-link">Copy link</button>
+          <button id="show-qr">Show QR code</button>
+        </div>
+        <img id="invitation-qr" alt="Scan to open the temporary invitation" hidden>
+      </div>
+      <p id="owner-feedback" role="status"></p>
+    </section>
+  </main>
+</body>
+</html>

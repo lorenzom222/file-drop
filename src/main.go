@@ -24,6 +24,7 @@ func run() error {
 	flag.StringVar(&c.Cert, "cert", "", "TLS certificate PEM")
 	flag.StringVar(&c.Key, "key", "", "TLS private key PEM")
 	flag.StringVar(&c.Inbox, "inbox", "", "absolute dedicated receiving directory")
+	flag.StringVar(&c.OwnerListen, "owner-listen", "", "optional separate loopback IP:port for the authenticated owner page")
 	flag.BoolVar(&c.DevHTTP, "dev-http", false, "unencrypted LOOPBACK ONLY, disposable test files")
 	flag.BoolVar(&c.TailscaleServe, "tailscale-serve", false, "loopback HTTP backend for private Tailscale Serve HTTPS; never Funnel")
 	flag.BoolVar(&c.ShareInbox, "share-inbox", false, "issue a separate invitation permitting uploads and read-only inbox metadata")
@@ -58,6 +59,19 @@ func run() error {
 	if err != nil {
 		return fmt.Errorf("listen: %w", err)
 	}
+	var ownerServer *http.Server
+	var ownerListener net.Listener
+	if c.OwnerListen != "" {
+		ownerListener, err = net.Listen("tcp", c.OwnerListen)
+		if err != nil {
+			return errors.Join(fmt.Errorf("owner listen: %w", err), listener.Close())
+		}
+		ownerServer = &http.Server{
+			Handler: a.ownerHandler(), ReadHeaderTimeout: 5 * time.Second,
+			IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10,
+			BaseContext: func(net.Listener) context.Context { return ctx },
+		}
+	}
 	if c.DevHTTP {
 		fmt.Println("WARNING: loopback-only unencrypted development mode. Use disposable files.")
 	}
@@ -75,7 +89,10 @@ func run() error {
 		fmt.Println("WARNING: download invite holders can read all visible regular files in the inbox.")
 		fmt.Printf("Download invitation (upload + view + download; expires in 10 minutes):\n%s/#%s\n", c.PublicURL, a.downloadInvitation)
 	}
-	done := make(chan error, 1)
+	if ownerServer != nil {
+		fmt.Printf("Owner page (local only; single-use link expires in 10 minutes):\n%s/#%s\n", a.ownerOrigin(), a.ownerBootstrap)
+	}
+	done := make(chan error, 2)
 	go func() {
 		if c.DevHTTP || c.TailscaleServe {
 			done <- server.Serve(listener)
@@ -83,24 +100,30 @@ func run() error {
 			done <- server.ServeTLS(listener, "", "")
 		}
 	}()
+	if ownerServer != nil {
+		go func() { done <- ownerServer.Serve(ownerListener) }()
+	}
+	var serveErr error
 	select {
 	case err := <-done:
-		if errors.Is(err, http.ErrServerClosed) {
-			return nil
+		if !errors.Is(err, http.ErrServerClosed) {
+			serveErr = err
 		}
-		return err
 	case <-ctx.Done():
-		shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := server.Shutdown(shutdown); err != nil {
-			slog.Warn("graceful shutdown exceeded deadline", "error", err)
-			if closeErr := server.Close(); closeErr != nil {
-				return closeErr
-			}
-			return err
-		}
-		return nil
 	}
+	stop()
+	shutdown, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	for _, running := range []*http.Server{server, ownerServer} {
+		if running == nil {
+			continue
+		}
+		if err := running.Shutdown(shutdown); err != nil {
+			slog.Warn("graceful shutdown exceeded deadline", "error", err)
+			serveErr = errors.Join(serveErr, err, running.Close())
+		}
+	}
+	return serveErr
 }
 
 func main() {

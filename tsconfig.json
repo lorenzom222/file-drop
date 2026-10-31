@@ -8,5 +8,5 @@
     "outDir": "src/ui/dist",
     "noEmitOnError": true
   },
-  "include": ["src/ui/app.ts"]
+  "include": ["src/ui/*.ts"]
 }

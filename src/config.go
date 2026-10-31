@@ -20,6 +20,7 @@ const (
 
 type config struct {
 	Listen, PublicURL, Cert, Key, Inbox string
+	OwnerListen                         string
 	DevHTTP                             bool
 	TailscaleServe                      bool
 	ShareInbox                          bool
@@ -38,6 +39,13 @@ func defaultConfig() config {
 }
 
 func (c config) validate() (*tls.Config, error) {
+	if c.OwnerListen != "" {
+		host, port, err := net.SplitHostPort(c.OwnerListen)
+		ip := net.ParseIP(host)
+		if err != nil || ip == nil || !ip.IsLoopback() || port == "" || port == "0" || c.OwnerListen == c.Listen {
+			return nil, errors.New("owner-listen must be a separate loopback IP:port")
+		}
+	}
 	if c.AllowDownloads && !c.ShareInbox {
 		return nil, errors.New("allow-downloads requires share-inbox")
 	}

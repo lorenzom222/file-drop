@@ -12,12 +12,14 @@ src/
   storage.go              Inbox, staging and upload capacity
   storage_darwin.go       macOS filesystem operations
   download.go             Signed offers and download streaming
+  owner.go                Local owner login, links and QR codes
   *_test.go               Go tests beside the implementation
   ui/
     index.html            Static interface
     style.css             Local font and simple styling
     fonts/                JetBrains Mono WOFF2 and license
     app.ts                Browser behavior
+    owner.html / owner.ts  Local Link device page
     dist/                 Generated JavaScript (ignored)
 bin/                      Compiled executable (ignored)
 go.mod / go.sum            Go dependencies
@@ -27,9 +29,26 @@ tsconfig.json              TypeScript settings
 
 ## Servers and clients
 
+With Tailscale Serve, the upload path is:
+
+```text
+Phone / other PC
+      │
+      │ HTTPS over Tailscale
+      ▼
+Tailscale Serve
+      │
+      │ HTTP over local loopback
+      ▼
+Go receiver
+      │
+      ▼
+Mac's inbox folder
+```
+
 | Component | Responsibility |
 |---|---|
-| Go receiver | Serves the UI; issues invitations and sessions; checks permissions; streams uploads/downloads; lists inbox metadata; enforces storage and transfer limits. |
+| Go receiver | Serves the client UI and optional local owner UI; issues invitations and sessions; checks permissions; streams uploads/downloads; lists inbox metadata; enforces storage and transfer limits. |
 | Tailscale Serve, when used | Provides private HTTPS and proxies requests to Go over loopback on the receiving computer. Does not manage the app's invitations or files. |
 | Browser client | Selects files, uploads them, shows progress/errors, polls the inbox, and starts native browser downloads. Does not run a background receiver or automatically save files when closed. |
 | Local inbox | Stores accepted files on the receiver. Files remain until the receiver's user removes them. |
@@ -52,13 +71,22 @@ This is a client/server relationship, not a peer-to-peer mesh. A browser cannot 
 | `GET /api/inbox` | Return file metadata and signed download offers when permitted. | View inbox |
 | `GET /api/downloads/{id}` | Stream an offered file as an attachment. | Download + valid session-bound offer |
 
+The optional owner listener has its own API, not accessible through the guest server:
+
+| Endpoint | Purpose | Required permission |
+|---|---|---|
+| `POST /api/owner/session` | Exchange a single-use startup owner link for a bearer credential. | Valid owner bootstrap |
+| `GET /api/owner/status` | Return the access levels enabled by receiver flags. | Owner |
+| `POST /api/owner/invitations` | Create or renew one permission's temporary invitation. | Owner |
+| `POST /api/owner/qr` | Generate a PNG QR code for the exact current invitation. | Owner |
+
 The receiver also serves the static page, JavaScript, stylesheet and local font. Upload and inbox responses are JSON; downloads are binary streams. Failures use non-success HTTP status codes.
 
 The server uses Go's `net/http`, multipart parsing, directory-relative filesystem APIs and cryptographic primitives. Browser clients use `fetch`, `XMLHttpRequest` for upload progress, and native file selection/downloads. Tailscale supplies encrypted device connectivity and Serve supplies HTTPS; neither replaces the app's permission checks.
 
 ## Build
 
-The receiver requires macOS, Go 1.25+ and Node/npm to build. Clients need a browser. Dependencies are TypeScript and `golang.org/x/sys`; the bundled font's source and license are in [src/ui/fonts/](./src/ui/fonts/README.md).
+The receiver requires macOS, Go 1.25+ and Node/npm to build. Clients need a browser. Dependencies are TypeScript, `golang.org/x/sys`, and `github.com/yeqown/go-qrcode/v2` for local QR encoding; the bundled font's source and license are in [src/ui/fonts/](./src/ui/fonts/README.md).
 
 ```sh
 npm ci
@@ -87,12 +115,47 @@ In another terminal, using the exact HTTPS origin printed by Serve:
   -tailscale-serve \
   -share-inbox \
   -allow-downloads \
+  -owner-listen 127.0.0.1:18445 \
   -listen 127.0.0.1:8443 \
   -public-url https://receiver.example-tailnet.ts.net \
   -inbox "$HOME/FileDropInbox"
 ```
 
 Open the appropriate invitation printed by Go. Keep both programs running and the receiver awake.
+
+### Link a device from the owner page
+
+`-owner-listen` enables a separate, local-only owner page. Open the **owner link** printed in the receiver's terminal on that same computer. The link is single-use and expires in 10 minutes; it grants an eight-hour owner session, stored in that tab's session storage. Refreshing the owner tab retains its session when browser storage is available. Do not share or proxy this page, or its bootstrap link.
+
+1. Select **Upload only**, **Upload and view inbox**, or **Upload, view and download**. Only enabled receiver permissions are selectable.
+2. Select **Create link** under **Link device**.
+3. Copy the invitation to another device, or show its QR code and scan with your phone.
+4. Connect that device to your tailnet before opening the invitation.
+5. Create a new link when it expires; no receiver restart is needed.
+
+Each new link lasts 10 minutes and replaces the previous invitation for that access level. Existing guest sessions retain their original permission and expiration; renewing an invitation does not disconnect or upgrade them. Other access levels' invitations are unchanged.
+
+This is temporary access, **not permanent device identity or pairing**. Anyone with the guest link can enroll during its validity window. The owner page never appears on the guest server. Guest session credentials cannot create invitations, and QR generation does not send URLs to an external service.
+
+Owner bootstrap authentication, exact Host/Origin checks, request markers and a separate loopback listener protect management access. The browser keeps its bearer credential in session storage on the owner origin, not in guest cookies or URLs. If storage is blocked, keep the owner tab open; a reload may require restarting for a fresh single-use bootstrap. Expired owner sessions require reopening a fresh owner link after receiver restart.
+
+```mermaid
+sequenceDiagram
+    %%{init: {"theme": "dark"}}%%
+    participant Owner as Local owner browser
+    participant Management as Owner listener
+    participant Guest as Guest browser
+    participant Receiver as Guest listener
+    Owner->>Management: POST /api/owner/session with single-use bootstrap
+    Management-->>Owner: Owner bearer credential
+    Owner->>Management: POST /api/owner/invitations with permission
+    Management-->>Owner: Guest link and expiration
+    Owner->>Management: POST /api/owner/qr with exact invitation
+    Management-->>Owner: Locally generated PNG
+    Note over Owner,Guest: Owner shares the guest link or displays its QR.
+    Guest->>Receiver: POST /api/session with guest invitation
+    Receiver-->>Guest: Scoped guest session cookie
+```
 
 Go listens only on loopback in this mode. Serve terminates HTTPS; session cookies remain Secure. The app validates the configured public Host and browser origin rather than trusting forwarded identity headers.
 
@@ -135,9 +198,9 @@ Development HTTP cannot bind to the LAN. Do not tunnel or publicly proxy it. Dir
 
 Each invitation is a separate unpredictable secret, reusable for 10 minutes. Browser sessions last 30 minutes, with a maximum of 32 sessions. Permission is captured at session creation: an upload-only or metadata-only session never automatically gains download access.
 
-The UI reads the invitation from the URL fragment, removes it, and exchanges it for an HttpOnly, SameSite=Strict cookie. HTTPS cookies are Secure. Reopen an invitation after refreshing; changing the invitation fragment reconnects the updated UI. Restarting revokes old sessions and generates new invitations.
+The UI reads the invitation from the URL fragment, removes it, and exchanges it for an HttpOnly, SameSite=Strict cookie. HTTPS cookies are Secure. Reopen a guest invitation after refreshing; changing its fragment reconnects the updated UI. The authenticated owner page can renew expired guest links without restarting. Restarting revokes all sessions and generates new invitations.
 
-Shared access applies to the **whole visible inbox**, not only one client's uploads, including files present before startup. Keep sensitive or unrelated files elsewhere. No remote file deletion, arbitrary directory browsing, or administrative API is provided.
+Shared access applies to the **whole visible inbox**, not only one client's uploads, including files present before startup. Keep sensitive or unrelated files elsewhere. No remote file deletion, arbitrary directory browsing, or guest-accessible administrative API is provided.
 
 ## Request sequence
 
@@ -282,13 +345,19 @@ go vet ./...
 go build -o bin/filedrop ./src
 ```
 
-Tests cover session/invitation expiration, permission separation, Host/Origin boundaries, confined storage, collisions, interrupted uploads, limits, listing filters, download offer tampering/replay, changed sources, symlinks, non-regular sources, attachment headers and transfer cancellation.
+Tests cover session/invitation expiration, permission separation, Host/Origin boundaries, confined storage, collisions, interrupted uploads, limits, listing filters, download offer tampering/replay, changed sources, symlinks, non-regular sources, attachment headers and transfer cancellation. Owner tests cover single-use bootstrap replay and expiry, scoped invitation renewal, unchanged guest permissions, disabled permissions, bounded bodies, local request guards, and QR output/expiry.
 
 Optional large-transfer checks compare hashes without buffering whole files:
 
 ```sh
 FILEDROP_LARGE=1 go test \
   -run 'TestLarge(ConcurrentUploads|Download)$' -v -timeout 5m ./src
+```
+
+Optional independent QR round-trip check uses macOS Vision via the Swift command-line tools:
+
+```sh
+FILEDROP_QR=1 go test -run TestQRRoundTrip -v ./src
 ```
 
 Manual acceptance: trusted HTTPS from a second device; upload/download hash comparisons; expired permissions; cancellation; responsive/mobile layout; live refresh; and private Serve/firewall/tailnet exposure.
