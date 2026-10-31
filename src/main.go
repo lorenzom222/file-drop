@@ -18,6 +18,12 @@ func run() error {
 	if os.Geteuid() == 0 {
 		return errors.New("run filedrop as a regular user, not root")
 	}
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "init", "confirm", "owner-link", "reset-trust":
+			return runControl(os.Args[1], os.Args[2:])
+		}
+	}
 	c := defaultConfig()
 	flag.StringVar(&c.Listen, "listen", c.Listen, "explicit receiving IP:port")
 	flag.StringVar(&c.PublicURL, "public-url", c.PublicURL, "exact origin used by browsers")
@@ -25,6 +31,7 @@ func run() error {
 	flag.StringVar(&c.Key, "key", "", "TLS private key PEM")
 	flag.StringVar(&c.Inbox, "inbox", "", "absolute dedicated receiving directory")
 	flag.StringVar(&c.OwnerListen, "owner-listen", "", "optional separate loopback IP:port for the authenticated owner page")
+	flag.StringVar(&c.StateDir, "state-dir", "", "explicitly initialized private pairing registry directory")
 	flag.BoolVar(&c.DevHTTP, "dev-http", false, "unencrypted LOOPBACK ONLY, disposable test files")
 	flag.BoolVar(&c.TailscaleServe, "tailscale-serve", false, "loopback HTTP backend for private Tailscale Serve HTTPS; never Funnel")
 	flag.BoolVar(&c.ShareInbox, "share-inbox", false, "issue a separate invitation permitting uploads and read-only inbox metadata")
@@ -54,6 +61,26 @@ func run() error {
 		}
 	}()
 	a := newApp(c, s, ctx)
+	if c.StateDir != "" {
+		a.registry, err = openRegistry(c.StateDir, false)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := a.registry.close(); err != nil {
+				slog.Error("close pairing registry", "error", err)
+			}
+		}()
+		control, err := startControl(a)
+		if err != nil {
+			return err
+		}
+		defer func() {
+			if err := control.Close(); err != nil {
+				slog.Warn("close control listener", "error", err)
+			}
+		}()
+	}
 	server := &http.Server{Handler: a.handler(), TLSConfig: tlsConfig, ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 << 10, BaseContext: func(net.Listener) context.Context { return ctx }}
 	listener, err := net.Listen("tcp", c.Listen)
 	if err != nil {

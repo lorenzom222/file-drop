@@ -15,13 +15,22 @@
     </header>
     <section id="owner-panel" aria-label="Link device" hidden>
       <h2>Link device</h2>
+      <label for="link-mode">Link type</label>
+      <select id="link-mode">
+        <option value="temporary">Temporary access</option>
+        <option value="remember" disabled>Remember browser</option>
+      </select>
+      <div id="pair-name-panel" hidden>
+        <label for="pair-name">Browser name</label>
+        <input id="pair-name" type="text" maxlength="80" autocomplete="off">
+      </div>
       <label for="permission">Access</label>
       <select id="permission">
         <option value="upload">Upload only</option>
         <option value="view" disabled>Upload and view inbox</option>
         <option value="download" disabled>Upload, view and download</option>
       </select>
-      <p class="muted owner-description">Temporary access, not permanent pairing. Links last 10 minutes; guest sessions last 30 minutes.</p>
+      <p id="link-policy" class="muted owner-description">Temporary link: 10 minutes. Guest session: 30 minutes.</p>
       <p id="access-description" class="muted">This link only permits uploads.</p>
       <button id="link-device">Create link</button>
       <div id="invitation-panel" hidden>
@@ -35,6 +44,12 @@
         <img id="invitation-qr" alt="Scan to open the temporary invitation" hidden>
       </div>
       <p id="owner-feedback" role="status"></p>
+    </section>
+    <section id="paired-management" aria-label="Paired browsers" hidden>
+      <h2>Paired browsers</h2>
+      <p id="clients-status" role="status"></p>
+      <div id="pending-approvals"></div>
+      <div id="paired-clients"></div>
     </section>
   </main>
 </body>

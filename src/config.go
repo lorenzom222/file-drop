@@ -21,6 +21,7 @@ const (
 type config struct {
 	Listen, PublicURL, Cert, Key, Inbox string
 	OwnerListen                         string
+	StateDir                            string
 	DevHTTP                             bool
 	TailscaleServe                      bool
 	ShareInbox                          bool
@@ -39,6 +40,13 @@ func defaultConfig() config {
 }
 
 func (c config) validate() (*tls.Config, error) {
+	if c.StateDir != "" {
+		state := filepath.Clean(c.StateDir)
+		inbox := filepath.Clean(c.Inbox)
+		if !filepath.IsAbs(state) || c.OwnerListen == "" || state == inbox || strings.HasPrefix(state, inbox+string(filepath.Separator)) || strings.HasPrefix(inbox, state+string(filepath.Separator)) {
+			return nil, errors.New("state-dir requires owner-listen and an absolute private directory separate from inbox")
+		}
+	}
 	if c.OwnerListen != "" {
 		host, port, err := net.SplitHostPort(c.OwnerListen)
 		ip := net.ParseIP(host)

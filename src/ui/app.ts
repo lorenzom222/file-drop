@@ -17,6 +17,12 @@ const inboxFiles = element("inbox-files", HTMLTableSectionElement);
 const downloadHeading = element("download-heading", HTMLTableCellElement);
 const uploadPanel = element("upload-panel", HTMLElement);
 const connectHelp = element("connect-help", HTMLElement);
+const pairPanel = element("pair-panel", HTMLElement);
+const pairButton = element("pair-browser", HTMLButtonElement);
+const pairStatus = element("pair-status", HTMLParagraphElement);
+const pairFingerprint = element("pair-fingerprint", HTMLParagraphElement);
+let pairingInvitation = "";
+let authGeneration = 0;
 
 type State = "ready" | "uploading" | "saved" | "failed" | "canceled";
 type Item = {
@@ -194,7 +200,7 @@ function message(value: unknown, fallback: string): string {
 
 function refresh(): void {
   uploadPanel.hidden = !authorized && !running;
-  connectHelp.hidden = authorized;
+  connectHelp.hidden = authorized || !pairPanel.hidden;
   inbox.hidden = !authorized || !canViewInbox;
   picker.disabled = !authorized || running;
   chooseButton.disabled = picker.disabled;
@@ -204,6 +210,7 @@ function refresh(): void {
 }
 
 async function authenticate(): Promise<void> {
+  const generation = ++authGeneration;
   const invitation = location.hash.slice(1);
   history.replaceState(null, "", location.pathname);
   authorized = false;
@@ -211,20 +218,47 @@ async function authenticate(): Promise<void> {
   canDownload = false;
   inbox.hidden = true;
   clearInbox();
-  refresh();
-  if (!invitation) {
-    connection.textContent = "Not connected";
-    connection.dataset.error = "false";
+  pairPanel.hidden = true;
+  pairStatus.textContent = pairFingerprint.textContent = "";
+  if (invitation.startsWith("pair=")) {
+    pairingInvitation = invitation.slice(5);
+    pairPanel.hidden = false;
+    pairButton.disabled = false;
+    connection.textContent = "Pairing invitation";
+    refresh();
     return;
   }
+  refresh();
   try {
+    let result: unknown;
+    if (!invitation) {
+      result = await reconnectBrowser((message, fingerprint) => {
+        if (generation !== authGeneration) return;
+        connection.textContent = message;
+        if (fingerprint) pairFingerprint.textContent = fingerprint;
+      });
+      if (generation !== authGeneration) return;
+      if (result === null) { connection.textContent = "Not connected"; connection.dataset.error = "false"; return; }
+    } else {
     const response = await fetch("/api/session", {
       method: "POST",
       headers: { ...headers, "Content-Type": "application/json" },
       body: JSON.stringify({ invitation }),
     });
-    const result: unknown = await response.json();
+    result = await response.json();
     if (!response.ok) throw new Error(message(result, "Could not authorize this browser."));
+    }
+    if (generation !== authGeneration) return;
+    acceptSession(result);
+  } catch (error) {
+    if (generation !== authGeneration) return;
+    connection.textContent = error instanceof Error ? error.message : "Connection failed.";
+    connection.dataset.error = "true";
+  }
+  refresh();
+}
+
+function acceptSession(result: unknown): void {
     if (typeof result !== "object" || result === null || !("max_file_bytes" in result) || typeof result.max_file_bytes !== "number" || !("can_view_inbox" in result) || typeof result.can_view_inbox !== "boolean" || !("can_download" in result) || typeof result.can_download !== "boolean") {
       throw new Error("Server returned an invalid session.");
     }
@@ -241,13 +275,27 @@ async function authenticate(): Promise<void> {
     inbox.hidden = !canViewInbox;
     downloadHeading.hidden = !canDownload;
     void refreshInbox();
-  } catch (error) {
-    connection.textContent = error instanceof Error ? error.message : "Connection failed.";
-    connection.dataset.error = "true";
-  }
+    pairPanel.hidden = true;
   refresh();
 }
 
+pairButton.addEventListener("click", async () => {
+  const generation = ++authGeneration;
+  pairButton.disabled = true;
+  try {
+    const result = await rememberBrowser(pairingInvitation, (message, fingerprint) => {
+      if (generation !== authGeneration) return;
+      pairStatus.textContent = message;
+      if (fingerprint) pairFingerprint.textContent = `Key: ${fingerprint.match(/.{1,4}/g)?.join(" ")}`;
+    });
+    if (generation === authGeneration) acceptSession(result);
+  } catch (error) {
+    if (generation === authGeneration) {
+      pairStatus.textContent = error instanceof Error ? error.message : "Pairing failed.";
+      pairStatus.dataset.error = "true";
+    }
+  }
+});
 chooseButton.addEventListener("click", () => picker.click());
 
 picker.addEventListener("change", () => {
@@ -352,3 +400,4 @@ document.addEventListener("visibilitychange", () => {
 window.addEventListener("hashchange", () => { void authenticate(); });
 
 void authenticate();
+import { reconnectBrowser, rememberBrowser } from "./pairing.js";

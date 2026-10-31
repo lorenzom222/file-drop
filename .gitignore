@@ -5,4 +5,8 @@
 *.key
 /inbox/
 /.private-validation.md
+/docs/persistent-pairing-design.md
 .DS_Store
+/state/
+/test-results/
+/playwright-report/

@@ -75,7 +75,7 @@ func verifyOffer(key, id string) (downloadOffer, error) {
 func (a *app) download(w http.ResponseWriter, r *http.Request) {
 	session, ok := a.sessionAccess(r)
 	if !ok {
-		writeError(w, 401, "session", "Session expired. Open a fresh invitation.")
+		a.authError(w, "Session expired or revoked.")
 		return
 	}
 	if !a.cfg.AllowDownloads || !session.canDownload {
@@ -126,6 +126,7 @@ func (a *app) download(w http.ResponseWriter, r *http.Request) {
 	}()
 	ctx, cancel := context.WithTimeout(r.Context(), a.cfg.UploadTimeout)
 	defer cancel()
+	defer watchRevocation(ctx, session.stop, cancel)()
 	stop := context.AfterFunc(a.ctx, cancel)
 	defer stop()
 	unblock := context.AfterFunc(ctx, func() {

@@ -23,6 +23,8 @@ type invitation struct {
 	expiresAt   time.Time
 	viewInbox   bool
 	canDownload bool
+	pair        bool
+	name        string
 }
 
 func (a *app) ownerOrigin() string {
@@ -43,6 +45,8 @@ func (a *app) ownerHandler() http.Handler {
 	mux.HandleFunc("GET /api/owner/status", a.ownerStatus)
 	mux.HandleFunc("POST /api/owner/invitations", a.ownerInvitation)
 	mux.HandleFunc("POST /api/owner/qr", a.ownerQR)
+	mux.HandleFunc("GET /api/owner/clients", a.ownerClients)
+	mux.HandleFunc("POST /api/owner/clients", a.ownerClientChange)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Referrer-Policy", "no-referrer")
@@ -129,18 +133,28 @@ func (a *app) ownerSession(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *app) ownerStatus(w http.ResponseWriter, r *http.Request) {
-	ownerJSON(w, map[string]any{"can_view_inbox": a.cfg.ShareInbox, "can_download": a.cfg.AllowDownloads})
+	ownerJSON(w, map[string]any{"can_view_inbox": a.cfg.ShareInbox, "can_download": a.cfg.AllowDownloads, "can_pair": a.registry != nil && !a.pairingFault.Load(), "state_dir": a.cfg.StateDir})
 }
 
 func (a *app) ownerInvitation(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Permission string `json:"permission"`
+		Mode       string `json:"mode"`
+		Name       string `json:"name"`
 	}
 	if !decodeOwnerRequest(w, r, &request) {
 		return
 	}
 	if request.Permission != "upload" && request.Permission != "view" && request.Permission != "download" {
 		writeError(w, 400, "permission", "Choose upload, view or download.")
+		return
+	}
+	if request.Mode != "" && request.Mode != "temporary" && request.Mode != "remember" {
+		writeError(w, 400, "mode", "Invalid link mode.")
+		return
+	}
+	if request.Mode == "remember" && (a.registry == nil || a.pairingFault.Load() || !validLabel(request.Name)) {
+		writeError(w, 400, "pairing", "Pairing requires initialized state and a name of 1-80 printable bytes.")
 		return
 	}
 	a.mu.Lock()
@@ -156,29 +170,44 @@ func (a *app) ownerInvitation(w http.ResponseWriter, r *http.Request) {
 	invite := invitation{
 		token: randomID(), expiresAt: a.now().Add(10 * time.Minute),
 		viewInbox: request.Permission != "upload", canDownload: request.Permission == "download",
+		pair: request.Mode == "remember", name: request.Name,
 	}
 	// Replace only this permission's invitation; existing guest sessions keep their scope.
-	a.invitations[request.Permission] = invite
-	ownerJSON(w, map[string]any{"url": a.cfg.PublicURL + "/#" + invite.token, "permission": request.Permission, "expires_at": invite.expiresAt})
+	key, fragment := request.Permission, invite.token
+	if invite.pair {
+		key = "pair-" + key
+		fragment = "pair=" + fragment
+	}
+	a.invitations[key] = invite
+	ownerJSON(w, map[string]any{"url": a.cfg.PublicURL + "/#" + fragment, "permission": request.Permission, "expires_at": invite.expiresAt, "mode": request.Mode})
 }
 
 func (a *app) ownerQR(w http.ResponseWriter, r *http.Request) {
 	var request struct {
 		Permission string `json:"permission"`
 		Invitation string `json:"invitation"`
+		Mode       string `json:"mode"`
 	}
 	if !decodeOwnerRequest(w, r, &request) {
 		return
 	}
 	a.mu.Lock()
-	invite, ok := a.invitations[request.Permission]
+	key := request.Permission
+	if request.Mode == "remember" {
+		key = "pair-" + key
+	}
+	invite, ok := a.invitations[key]
 	now := a.now()
 	a.mu.Unlock()
 	if !ok || !now.Before(invite.expiresAt) || subtle.ConstantTimeCompare([]byte(request.Invitation), []byte(invite.token)) != 1 {
 		writeError(w, 410, "invitation", "Invitation expired. Create a new link.")
 		return
 	}
-	code, err := qrcode.New(a.cfg.PublicURL + "/#" + invite.token)
+	fragment := invite.token
+	if invite.pair {
+		fragment = "pair=" + fragment
+	}
+	code, err := qrcode.New(a.cfg.PublicURL + "/#" + fragment)
 	if err != nil {
 		slog.Error("could not encode invitation QR", "error", err)
 		writeError(w, 500, "qr", "Could not create the QR code.")
@@ -195,7 +224,7 @@ func (a *app) ownerQR(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	a.mu.Lock()
-	current := a.invitations[request.Permission]
+	current := a.invitations[key]
 	valid := a.now().Before(current.expiresAt) && current.token == invite.token
 	a.mu.Unlock()
 	if !valid {

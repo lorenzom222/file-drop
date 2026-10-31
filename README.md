@@ -13,6 +13,9 @@ src/
   storage_darwin.go       macOS filesystem operations
   download.go             Signed offers and download streaming
   owner.go                Local owner login, links and QR codes
+  pairing.go              Browser proof and current authorization
+  registry.go             SQLite pairing state
+  control.go              Local terminal confirmations
   *_test.go               Go tests beside the implementation
   ui/
     index.html            Static interface
@@ -20,6 +23,7 @@ src/
     fonts/                JetBrains Mono WOFF2 and license
     app.ts                Browser behavior
     owner.html / owner.ts  Local Link device page
+    pairing.ts            IndexedDB keys and reconnect proof
     dist/                 Generated JavaScript (ignored)
 bin/                      Compiled executable (ignored)
 go.mod / go.sum            Go dependencies
@@ -86,7 +90,7 @@ The server uses Go's `net/http`, multipart parsing, directory-relative filesyste
 
 ## Build
 
-The receiver requires macOS, Go 1.25+ and Node/npm to build. Clients need a browser. Dependencies are TypeScript, `golang.org/x/sys`, and `github.com/yeqown/go-qrcode/v2` for local QR encoding; the bundled font's source and license are in [src/ui/fonts/](./src/ui/fonts/README.md).
+The receiver requires macOS, Go 1.26+ and Node/npm to build. Clients need a browser. Dependencies include TypeScript, `golang.org/x/sys`, SQLite via `modernc.org/sqlite`, and `github.com/yeqown/go-qrcode/v2` for local QR encoding. Playwright is used for E2E tests. The bundled font's source and license are in [src/ui/fonts/](./src/ui/fonts/README.md).
 
 ```sh
 npm ci
@@ -137,7 +141,55 @@ Each new link lasts 10 minutes and replaces the previous invitation for that acc
 
 This is temporary access, **not permanent device identity or pairing**. Anyone with the guest link can enroll during its validity window. The owner page never appears on the guest server. Guest session credentials cannot create invitations, and QR generation does not send URLs to an external service.
 
-Owner bootstrap authentication, exact Host/Origin checks, request markers and a separate loopback listener protect management access. The browser keeps its bearer credential in session storage on the owner origin, not in guest cookies or URLs. If storage is blocked, keep the owner tab open; a reload may require restarting for a fresh single-use bootstrap. Expired owner sessions require reopening a fresh owner link after receiver restart.
+Owner bootstrap authentication, exact Host/Origin checks, request markers and a separate loopback listener protect management access. The browser keeps its bearer credential in session storage on the owner origin, not in guest cookies or URLs. If storage is blocked, keep the owner tab open. With persistent state enabled, `owner-link` can issue a fresh bootstrap without restarting; otherwise expired owner sessions require a receiver restart.
+
+### Remember a browser
+
+Persistent pairing is optional. Initialize a private state directory outside the inbox once:
+
+```sh
+./bin/filedrop init -state-dir "$HOME/Library/Application Support/FileDrop"
+```
+
+Start the receiver with the existing options plus:
+
+```sh
+-state-dir "$HOME/Library/Application Support/FileDrop"
+```
+
+Pairing requires the local owner listener. State must be a real, owner-only directory (mode 0700); it cannot be inside or contain the inbox. Missing or corrupt registry state is an error, not an automatic reset.
+
+1. On the owner page, select **Remember browser**, enter a name and choose access.
+2. Create the single-use link or QR, then open it on the client.
+3. Select **Request pairing**. Compare the displayed key fingerprint with the pending request on the owner page.
+4. Run the pending request's confirmation command in a terminal on the receiver, and type `yes`.
+5. Later, open the ordinary receiver URL. That browser profile reconnects with its saved key.
+
+The browser keeps a nonextractable P-256 signing key in IndexedDB; the receiver stores its public key and permissions in SQLite. Pairing lasts until revoked, but sessions still expire after 30 minutes. Storage clearing or a different browser profile requires re-pairing. This identifies a browser credential, not a physical device. New enrollment uses a separate candidate key until approval and login succeed, preserving any existing pairing if an enrollment fails.
+
+The **Paired browsers** section lets the owner rename browsers, reduce permissions, or revoke access. Permission increases require another terminal confirmation. Existing sessions never gain permissions automatically; changes invalidate sessions and download offers. Revocation persists across restart and cancels active transfers, but cannot retract bytes already delivered.
+
+Local CLI operations use a private Unix socket and check peer UID:
+
+```sh
+./bin/filedrop confirm -state-dir "$HOME/Library/Application Support/FileDrop" REQUEST_ID
+./bin/filedrop owner-link -state-dir "$HOME/Library/Application Support/FileDrop"
+./bin/filedrop reset-trust -state-dir "$HOME/Library/Application Support/FileDrop"
+```
+
+`owner-link` creates a fresh, single-use owner bootstrap without restarting. `reset-trust` requires interactive confirmation, rotates the trust epoch and revokes all browsers. Direct approval/reset HTTP endpoints do not exist.
+
+When restoring a state backup, stop the receiver, restore its private files, then run this **before** starting it:
+
+```sh
+./bin/filedrop reset-trust -offline -state-dir "$HOME/Library/Application Support/FileDrop"
+```
+
+Offline reset refuses an in-use registry. Starting a restored registry without this reset is unsupported and can resurrect old trust; arbitrary filesystem rollback cannot be detected.
+
+Storage is bounded to 128 saved client identities (including revoked ones), 16 live approvals, 64 challenges and 32 sessions. Completed/expired approval history keeps the latest 256 records, and audit history keeps the latest 1,024 events.
+
+Temporary links remain available. They do not implicitly pair a browser or gain persistent permissions.
 
 ```mermaid
 sequenceDiagram
@@ -345,7 +397,16 @@ go vet ./...
 go build -o bin/filedrop ./src
 ```
 
-Tests cover session/invitation expiration, permission separation, Host/Origin boundaries, confined storage, collisions, interrupted uploads, limits, listing filters, download offer tampering/replay, changed sources, symlinks, non-regular sources, attachment headers and transfer cancellation. Owner tests cover single-use bootstrap replay and expiry, scoped invitation renewal, unchanged guest permissions, disabled permissions, bounded bodies, local request guards, and QR output/expiry.
+Tests cover session/invitation expiration, permission separation, Host/Origin boundaries, confined storage, collisions, interrupted uploads, limits, listing filters, download offer tampering/replay, changed sources, symlinks, non-regular sources, attachment headers and transfer cancellation. Owner tests cover single-use bootstrap replay and expiry, scoped invitation renewal, unchanged guest permissions, disabled permissions, bounded bodies, local request guards, and QR output/expiry. Pairing tests cover key substitution/replay, single-use enrollment, stale terminal approvals, reductions, durable state, trust reset, fail-closed database errors and publication/revocation ordering.
+
+Browser E2E tests start their own temporary receiver, use a real terminal PTY for confirmation, and test enrollment, upload/native download, reload, server restart, permission reductions/increases, and revocation:
+
+```sh
+npx playwright install chromium firefox webkit
+npm run test:e2e
+```
+
+Build the executable before running E2E. Tests run in Chromium, Firefox and mobile-emulated WebKit; WebKit emulation is not a physical iPhone/Safari test. Test state, reports and traces are not committed.
 
 Optional large-transfer checks compare hashes without buffering whole files:
 
@@ -369,5 +430,9 @@ Authentication and encryption do not make files harmless. Authorized senders can
 Tailscale login, access policy, HTTPS configuration and absence of Funnel are external dependencies, not verified by the app. Local malware running as the same user or administrator is outside the protection boundary. Revocation cannot retract already downloaded bytes.
 
 The baseline implementation and the new authenticated download surface received separate bounded read-only security reviews with no verified exploitable findings. That is not proof of security: live attacks, exhaustive dependency review, tailnet policy and filesystem/platform behavior were not independently verified.
+
+Persistent pairing and its post-review refinements also received direct-source security review with no verified reportable findings. Automated tests are evidence for the covered cases, not a guarantee of all browser, crash or network behavior.
+
+Pairing uses fresh, purpose-bound key proofs and authoritative registry status/generation checks during transfers. The terminal confirmation boundary assumes the receiver's local user account is trusted; it is not biometric verification or protection against same-user native malware. Browser nonextractability does not stop same-origin scripts or malicious extensions from using a key. No uploaded content is executed or previewed.
 
 Device-specific validation history is kept in an ignored local Markdown file, not this public document. Git ignore does not erase history or protect a file deliberately force-added; inspect staged changes before publishing.

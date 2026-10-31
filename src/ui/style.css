@@ -75,6 +75,11 @@ td a { display: inline-flex; align-items: center; min-height: 44px; margin: -10p
 #invitation-status { margin: 8px 0 12px; }
 .owner-actions { display: flex; flex-wrap: wrap; gap: 12px; }
 #invitation-qr { max-width: 100%; width: 300px; height: auto; margin-top: 16px; image-rendering: pixelated; }
+.paired-entry { border-top: 1px solid var(--border); margin-top: 16px; padding-top: 16px; overflow-wrap: anywhere; }
+.paired-entry p, .paired-entry code { display: block; margin: 8px 0; font-size: .875rem; }
+.paired-entry input, .paired-entry select { width: 100%; min-height: 44px; margin: 8px 0; padding: 8px; color: var(--text); background: var(--page); border: 1px solid var(--border); font: inherit; }
+.paired-entry button { margin: 8px 12px 0 0; }
+#pair-fingerprint, #pair-name { overflow-wrap: anywhere; margin: 12px 0; }
 @media (max-width: 640px) {
   main { margin: 24px auto; padding: 0 16px; }
   section { padding: 16px; }

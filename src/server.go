@@ -16,19 +16,25 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-//go:embed ui/index.html ui/owner.html ui/style.css ui/dist/app.js ui/dist/owner.js ui/fonts/jetbrains-mono.woff2 ui/fonts/OFL.txt
+//go:embed ui/index.html ui/owner.html ui/style.css ui/dist/app.js ui/dist/owner.js ui/dist/pairing.js ui/fonts/jetbrains-mono.woff2 ui/fonts/OFL.txt
 var assets embed.FS
 
 const cookieName = "filedrop_session"
 
 type uploadSession struct {
+	canUpload   bool
 	expiresAt   time.Time
 	viewInbox   bool
 	canDownload bool
 	offerKey    string
+	clientID    string
+	generation  int64
+	epoch       string
+	stop        <-chan struct{}
 }
 
 type app struct {
@@ -48,6 +54,14 @@ type app struct {
 	now                func() time.Time
 	ctx                context.Context
 	downloadSlots      chan struct{}
+	registry           *registry
+	authority          sync.Mutex
+	pairingFault       atomic.Bool
+	challenges         map[string]pairingChallenge
+	pendingTickets     map[string]pendingTicket
+	pairedStops        map[string]chan struct{}
+	challengeWindow    time.Time
+	challengeCount     int
 }
 
 func newApp(c config, s *store, ctx context.Context) *app {
@@ -69,6 +83,9 @@ func newApp(c config, s *store, ctx context.Context) *app {
 		a.ownerBootstrap = randomID()
 		a.ownerBootstrapEnd = time.Now().Add(10 * time.Minute)
 	}
+	a.challenges = make(map[string]pairingChallenge)
+	a.pendingTickets = make(map[string]pendingTicket)
+	a.pairedStops = make(map[string]chan struct{})
 	return a
 }
 
@@ -110,12 +127,17 @@ func (a *app) handler() http.Handler {
 		"GET /{$}":                        "ui/index.html",
 		"GET /style.css":                  "ui/style.css",
 		"GET /app.js":                     "ui/dist/app.js",
+		"GET /pairing.js":                 "ui/dist/pairing.js",
 		"GET /fonts/jetbrains-mono.woff2": "ui/fonts/jetbrains-mono.woff2",
 		"GET /fonts/OFL.txt":              "ui/fonts/OFL.txt",
 	} {
 		mux.HandleFunc(route, assetHandler(path))
 	}
 	mux.HandleFunc("POST /api/session", a.session)
+	mux.HandleFunc("GET /api/pairing/info", a.pairingInfo)
+	mux.HandleFunc("POST /api/pairing/challenge", a.pairingChallenge)
+	mux.HandleFunc("POST /api/pairing/proof", a.pairingProof)
+	mux.HandleFunc("POST /api/pairing/status", a.pendingStatus)
 	mux.HandleFunc("POST /api/uploads", a.upload)
 	mux.HandleFunc("GET /api/inbox", a.inbox)
 	mux.HandleFunc("GET /api/downloads/{id}", a.download)
@@ -134,7 +156,7 @@ func (a *app) handler() http.Handler {
 				return
 			}
 		}
-		if r.URL.Path == "/api/inbox" {
+		if r.URL.Path == "/api/inbox" || strings.HasPrefix(r.URL.Path, "/api/pairing/") {
 			origin, site := r.Header.Get("Origin"), r.Header.Get("Sec-Fetch-Site")
 			if r.Header.Get("X-Filedrop-Request") != "1" || (origin != "" && origin != a.cfg.PublicURL) || (site != "" && site != "same-origin") {
 				writeError(w, 403, "origin", "Inbox requests must come from this page.")
@@ -153,6 +175,10 @@ func (a *app) handler() http.Handler {
 }
 
 func (a *app) session(w http.ResponseWriter, r *http.Request) {
+	if a.pairingFault.Load() {
+		a.authError(w, "")
+		return
+	}
 	controller := http.NewResponseController(w)
 	if err := controller.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		slog.Error("cannot enforce session read deadline", "error", err)
@@ -190,7 +216,7 @@ func (a *app) session(w http.ResponseWriter, r *http.Request) {
 	var selected invitation
 	valid := false
 	for _, invite := range a.invitations {
-		if subtle.ConstantTimeCompare([]byte(request.Invitation), []byte(invite.token)) == 1 && now.Before(invite.expiresAt) {
+		if !invite.pair && subtle.ConstantTimeCompare([]byte(request.Invitation), []byte(invite.token)) == 1 && now.Before(invite.expiresAt) {
 			selected, valid = invite, true
 		}
 	}
@@ -207,12 +233,8 @@ func (a *app) session(w http.ResponseWriter, r *http.Request) {
 	}
 	token := randomID()
 	end := now.Add(30 * time.Minute)
-	a.sessions[token] = uploadSession{expiresAt: end, viewInbox: selected.viewInbox, canDownload: selected.canDownload, offerKey: randomID()}
-	http.SetCookie(w, &http.Cookie{Name: cookieName, Value: token, Path: "/", HttpOnly: true, Secure: !a.cfg.DevHTTP, SameSite: http.SameSiteStrictMode, MaxAge: 1800})
-	w.Header().Set("Content-Type", "application/json")
-	if err := json.NewEncoder(w).Encode(map[string]any{"expires_at": end, "max_file_bytes": a.cfg.FileLimit, "can_view_inbox": selected.viewInbox, "can_download": selected.canDownload}); err != nil {
-		slog.Warn("could not deliver session response", "error", err)
-	}
+	a.sessions[token] = uploadSession{expiresAt: end, canUpload: true, viewInbox: selected.viewInbox, canDownload: selected.canDownload, offerKey: randomID()}
+	a.respondSession(w, token, a.sessions[token])
 }
 
 func (a *app) authorized(r *http.Request) bool {
@@ -221,20 +243,15 @@ func (a *app) authorized(r *http.Request) bool {
 }
 
 func (a *app) sessionAccess(r *http.Request) (uploadSession, bool) {
-	cookie, err := r.Cookie(cookieName)
-	if err != nil || a.ctx.Err() != nil {
-		return uploadSession{}, false
-	}
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	session, ok := a.sessions[cookie.Value]
-	return session, ok && a.now().Before(session.expiresAt)
+	a.authority.Lock()
+	defer a.authority.Unlock()
+	return a.currentSessionLocked(r)
 }
 
 func (a *app) inbox(w http.ResponseWriter, r *http.Request) {
 	session, ok := a.sessionAccess(r)
 	if !ok {
-		writeError(w, 401, "session", "Session expired. Open a fresh invitation.")
+		a.authError(w, "Session expired or revoked.")
 		return
 	}
 	if !a.cfg.ShareInbox || !session.viewInbox {
@@ -253,7 +270,7 @@ func (a *app) inbox(w http.ResponseWriter, r *http.Request) {
 	}
 	session, ok = a.sessionAccess(r)
 	if !ok || !session.viewInbox {
-		writeError(w, 401, "session", "Session expired before the inbox was read.")
+		a.authError(w, "Session expired before the inbox was read.")
 		return
 	}
 	if session.canDownload {
@@ -282,8 +299,9 @@ func (a *app) storageError(w http.ResponseWriter, err error) {
 }
 
 func (a *app) upload(w http.ResponseWriter, r *http.Request) {
-	if !a.authorized(r) {
-		writeError(w, 401, "session", "Upload session expired. Open a fresh invitation.")
+	session, ok := a.sessionAccess(r)
+	if !ok || !session.canUpload {
+		a.authError(w, "Upload authorization expired or was revoked.")
 		return
 	}
 	controller := http.NewResponseController(w)
@@ -299,6 +317,7 @@ func (a *app) upload(w http.ResponseWriter, r *http.Request) {
 	}()
 	ctx, cancel := context.WithTimeout(r.Context(), a.cfg.UploadTimeout)
 	defer cancel()
+	defer watchRevocation(ctx, session.stop, cancel)()
 	stop := context.AfterFunc(a.ctx, cancel)
 	defer stop()
 	unblock := context.AfterFunc(ctx, func() {
@@ -359,6 +378,11 @@ func (a *app) upload(w http.ResponseWriter, r *http.Request) {
 		}
 		n, readErr := part.Read(buffer)
 		if n > 0 {
+			current, ok := a.sessionAccess(r)
+			if !ok || !current.canUpload {
+				a.authError(w, "Upload authorization revoked.")
+				return
+			}
 			if size+int64(n) > a.cfg.FileLimit {
 				writeError(w, 413, "size", "File exceeds the receiving size limit.")
 				return
@@ -422,8 +446,12 @@ func (a *app) upload(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 401, "session", "Authorization expired before the file was saved.")
 		return
 	}
-	storedName, err := a.store.finalize(stage, name)
+	storedName, err := a.publishUpload(ctx, r, stage, name)
 	if err != nil {
+		if errors.Is(err, errPairingAuth) {
+			a.authError(w, "Upload authorization ended before publication.")
+			return
+		}
 		a.storageError(w, err)
 		return
 	}
