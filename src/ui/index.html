@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>File Drop</title>
+  <link rel="stylesheet" href="/style.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <main>
+    <header class="page-header">
+      <h1>File Drop</h1>
+      <p id="connection" role="status">Connecting...</p>
+    </header>
+    <section id="connect-help" aria-label="Connect">
+      <h2>Connection required</h2>
+      <p>Open the full invitation link from the receiving computer.</p>
+    </section>
+    <section id="upload-panel" aria-label="File upload" hidden>
+      <h2>Upload files</h2>
+      <div class="upload-controls">
+        <input id="files" type="file" multiple hidden disabled>
+        <button id="choose-files" type="button" disabled>Choose files</button>
+        <button id="upload" disabled>Upload</button>
+      </div>
+      <p id="selection" class="muted" role="status">No files selected.</p>
+      <p id="limits" class="muted"></p>
+      <ul id="queue" aria-label="Selected files"></ul>
+    </section>
+    <section id="inbox" aria-label="Shared inbox" hidden>
+      <h2>Inbox</h2>
+      <p id="inbox-status" role="status" tabindex="-1">Loading inbox...</p>
+      <div class="table-wrap">
+        <table role="table">
+          <caption class="sr-only">Inbox files, newest modified first</caption>
+          <thead><tr role="row"><th scope="col">File</th><th scope="col">Size</th><th scope="col">Modified</th><th id="download-heading" scope="col" hidden>Download</th></tr></thead>
+          <tbody id="inbox-files"></tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

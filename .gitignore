@@ -1,0 +1,8 @@
+/bin/
+/node_modules/
+/src/ui/dist/
+*.pem
+*.key
+/inbox/
+/.private-validation.md
+.DS_Store
