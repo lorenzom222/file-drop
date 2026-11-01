@@ -177,6 +177,8 @@ The browser keeps a nonextractable P-256 signing key in IndexedDB; the receiver 
 
 The **Paired browsers** section lets the owner rename browsers, reduce permissions, or revoke access. Permission increases require another terminal confirmation. Existing sessions never gain permissions automatically; changes invalidate sessions and download offers. Revocation persists across restart and cancels active transfers, but cannot retract bytes already delivered.
 
+Unsaved owner edits are preserved across polling. Save access applies one browser's edits; Cancel unsaved edits reloads the server state without applying them.
+
 Local CLI operations use a private Unix socket and check peer UID:
 
 ```sh

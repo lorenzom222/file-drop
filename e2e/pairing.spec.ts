@@ -3,12 +3,13 @@ import { spawn, execFileSync, ChildProcess } from "node:child_process";
 import { mkdtempSync, realpathSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { env } from "node:process";
 
 test("pair, terminal-confirm, transfer, restart, reduce, increase and revoke", async ({ browser }, testInfo) => {
   const root = realpathSync(mkdtempSync(path.join(tmpdir(), "filedrop-e2e-")));
   const state = path.join(root, "state");
   const inbox = path.join(root, "inbox");
-  const binary = path.resolve("bin/filedrop");
+  const binary = path.resolve(env.FILEDROP_BINARY ?? "bin/filedrop");
   const guestURL = "http://127.0.0.1:19444";
   const ownerURL = "http://127.0.0.1:19445";
   const contexts = [];
@@ -120,7 +121,15 @@ if code: raise SystemExit(text.decode(errors='replace'))
     }).toBe(1);
     const row = owner.locator("#paired-clients .paired-entry").first();
     await row.locator("select").selectOption("upload");
+    await owner.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
+    await owner.waitForTimeout(2500);
+    await expect(row.locator("select")).toHaveValue("upload");
+    await expect(owner.getByRole("button", { name: "Cancel unsaved edits", exact: true })).toBeVisible();
+    const reduced = owner.waitForResponse(response => response.url().endsWith("/api/owner/clients") && response.request().method() === "POST");
     await row.getByRole("button", { name: "Save access", exact: true }).click();
+    const reduction = await reduced;
+    expect(reduction.status()).toBe(200);
+    expect(reduction.request().postDataJSON().permission).toBe("upload");
     await guest.reload();
     await expect(guest.locator("#upload-panel")).toBeVisible();
     await expect(guest.locator("#inbox")).toBeHidden();
@@ -130,7 +139,9 @@ if code: raise SystemExit(text.decode(errors='replace'))
       return row.locator("select").inputValue();
     }).toBe("upload");
     await row.locator("select").selectOption("download");
+    const increased = owner.waitForResponse(response => response.url().endsWith("/api/owner/clients") && response.request().method() === "POST");
     await row.getByRole("button", { name: "Save access", exact: true }).click();
+    expect((await increased).status()).toBe(200);
     await expect.poll(async () => {
       await owner.evaluate(() => document.activeElement instanceof HTMLElement && document.activeElement.blur());
       await owner.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
@@ -141,7 +152,9 @@ if code: raise SystemExit(text.decode(errors='replace'))
     terminalConfirm(increase);
     await guest.reload();
     await expect(guest.getByRole("link", { name: "Download roundtrip.txt", exact: true })).toBeVisible();
+    const revoked = owner.waitForResponse(response => response.url().endsWith("/api/owner/clients") && response.request().method() === "POST");
     await row.getByRole("button", { name: "Revoke", exact: true }).click();
+    expect((await revoked).status()).toBe(200);
     await expect.poll(async () => readFileSync(path.join(inbox, "roundtrip.txt"), "utf8")).toBe("paired transfer");
     await guest.reload();
     await expect(guest.locator("#upload-panel")).toBeHidden();

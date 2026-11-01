@@ -10,9 +10,13 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime"
 	"syscall"
 	"time"
 )
+
+var releaseVersion = "dev"
+var releaseRevision = "unknown"
 
 func run() error {
 	if os.Geteuid() == 0 {
@@ -25,6 +29,7 @@ func run() error {
 		}
 	}
 	c := defaultConfig()
+	showVersion := flag.Bool("version", false, "print release version, revision and platform")
 	flag.StringVar(&c.Listen, "listen", c.Listen, "explicit receiving IP:port")
 	flag.StringVar(&c.PublicURL, "public-url", c.PublicURL, "exact origin used by browsers")
 	flag.StringVar(&c.Cert, "cert", "", "TLS certificate PEM")
@@ -42,6 +47,10 @@ func run() error {
 	flag.IntVar(&c.Concurrency, "concurrency", c.Concurrency, "global active upload limit (1-2)")
 	flag.DurationVar(&c.UploadTimeout, "upload-timeout", c.UploadTimeout, "maximum upload duration")
 	flag.Parse()
+	if *showVersion {
+		fmt.Printf("File Drop %s (%s, %s/%s)\n", releaseVersion, releaseRevision, runtime.GOOS, runtime.GOARCH)
+		return nil
+	}
 	if flag.NArg() != 0 {
 		return errors.New("unexpected arguments; use filedrop -help")
 	}

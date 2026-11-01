@@ -21,13 +21,13 @@ A file-transfer app with one receiving computer and browser clients. Clients use
 - Stream files with progress, cancellation, size limits, and no silent overwrites.
 - Use private Tailscale HTTPS without cloud file storage.
 
-**Current status:** early, source-built app. The receiver supports macOS only. There is no one-click installer or prebuilt release yet.
+**Current status:** early macOS preview. See [releases](https://github.com/lorenzom222/file-drop/releases) for Apple Silicon and Intel executable archives. Preview binaries are ad-hoc signed only, not Developer ID signed or notarized; this is not a one-click installer.
 
 ## Requirements
 
 | Where | Required |
 |---|---|
-| Receiving Mac | Go 1.26+, Node.js/npm to build, and Tailscale for the recommended network setup |
+| Receiving Mac | macOS 15 is the tested baseline; Tailscale for the recommended network setup. Go 1.26+ and Node/npm are needed only to build from source. |
 | Phone / other computer | A current browser and Tailscale connected to the same authorized tailnet |
 
 Install [Go](https://go.dev/doc/install), [Node.js](https://nodejs.org/en/download), and [Tailscale](https://tailscale.com/download) if needed.
@@ -36,9 +36,13 @@ Tailscale can connect devices on the same Wi-Fi or across networks. It uses clou
 
 ## Quick start
 
-### 1. Build on the receiver
+### 1. Get the executable
 
-Download or clone this repository, then open a terminal in its root:
+Download the matching archive and `SHA256SUMS.txt` from the [release page](https://github.com/lorenzom222/file-drop/releases). Apple Silicon uses `darwin-arm64`; Intel uses `darwin-amd64`. Follow the included `SETUP.md` to verify its checksum, extract it, and open a terminal in its folder.
+
+Preview binaries are not notarized. macOS may warn or block them; do not disable system protections to run a preview. Build from reviewed source instead if your policy requires it. See [preview setup](docs/release-setup.md).
+
+To build from source instead, clone the repository and run:
 
 ```sh
 npm ci
@@ -47,6 +51,8 @@ go build -o bin/filedrop ./src
 ```
 
 Node is needed for building the frontend, not for running the resulting executable.
+
+Check the executable with `./bin/filedrop -version`.
 
 ### 2. Start private HTTPS
 
@@ -193,6 +199,8 @@ npm run screenshots
 ```
 
 This renders the real frontend with intercepted example responses, without accessing your inbox, state, or Tailscale account.
+
+For versioned archives, checksums and bundled dependency notices, see [release packaging](docs/release-packaging.md). Packaging-helper tests use `python3 -m unittest discover -s scripts -p 'test_*.py'`.
 
 ## License
 

@@ -55,6 +55,9 @@ jobs:
       - name: Build executable
         run: go build -o bin/filedrop ./src
 
+      - name: Test release packaging helpers
+        run: python3 -m unittest discover -s scripts -p 'test_*.py'
+
       - name: Install browser engines
         run: npx playwright install chromium firefox webkit
 

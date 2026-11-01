@@ -26,6 +26,8 @@ const management = ownerElement("paired-management", HTMLElement);
 const clientsStatus = ownerElement("clients-status", HTMLParagraphElement);
 const pendingApprovals = ownerElement("pending-approvals", HTMLDivElement);
 const pairedClients = ownerElement("paired-clients", HTMLDivElement);
+const cancelEdits = ownerElement("cancel-edits", HTMLButtonElement);
+const dirtyClients = new Set<string>();
 let stateDir = "";
 let canPair = false;
 let clientsLoading = false;
@@ -64,6 +66,8 @@ function forgetCredential(): void {
   management.hidden = true;
   pendingApprovals.replaceChildren();
   pairedClients.replaceChildren();
+  dirtyClients.clear();
+  cancelEdits.hidden = true;
   clearInvitation();
   if (storageAvailable) {
     try { sessionStorage.removeItem(storageKey); }
@@ -261,11 +265,17 @@ function text(tag: string, value: string): HTMLElement {
 }
 function groupFingerprint(value: string): string { return value.match(/.{1,4}/g)?.join(" ") ?? value; }
 async function changeClient(body: object): Promise<void> {
-  try { await request("/api/owner/clients", body); report("Access updated. Increases need terminal confirmation."); void refreshClients(true); }
+  try {
+    await request("/api/owner/clients", body);
+    if ("id" in body && typeof body.id === "string") dirtyClients.delete(body.id);
+    cancelEdits.hidden = dirtyClients.size === 0;
+    report("Access updated. Increases need terminal confirmation.");
+    void refreshClients(true);
+  }
   catch (error) { report(error instanceof Error ? error.message : "Could not change access.", true); }
 }
 async function refreshClients(force = false): Promise<void> {
-  if (!credential || !canPair || clientsLoading || (!force && (document.visibilityState !== "visible" || management.contains(document.activeElement)))) return;
+  if (!credential || !canPair || clientsLoading || (!force && (document.visibilityState !== "visible" || management.contains(document.activeElement) || dirtyClients.size > 0))) return;
   clientsLoading = true;
   try {
     const response = await request("/api/owner/clients");
@@ -280,8 +290,14 @@ async function refreshClients(force = false): Promise<void> {
       decline.addEventListener("click", () => { void changeClient({ id: p.id, action: "decline" }); });
       row.append(decline); return row;
     });
+    const existing = new Map(Array.from(pairedClients.children).flatMap(row =>
+      row instanceof HTMLElement && row.dataset.clientId ? [[row.dataset.clientId, row] as const] : []));
+    const activeIDs = new Set(data.clients.filter(c => c.status === "active").map(c => c.id));
+    for (const id of dirtyClients) if (!activeIDs.has(id)) dirtyClients.delete(id);
     const clients = data.clients.map(c => {
-      const row = document.createElement("div"); row.className = "paired-entry";
+      const edited = existing.get(c.id);
+      if (dirtyClients.has(c.id) && c.status === "active" && edited) return edited;
+      const row = document.createElement("div"); row.className = "paired-entry"; row.dataset.clientId = c.id;
       row.append(text("strong", `${c.name} · ${c.status}`), text("p", `Key: ${groupFingerprint(c.fingerprint)}`), text("p", `Last authenticated: ${new Date(c.last_seen).toLocaleString()}`));
       if (c.status === "active") {
         const label = document.createElement("input"); label.value = c.name; label.maxLength = 80; label.setAttribute("aria-label", `Name for ${c.name}`);
@@ -298,6 +314,7 @@ async function refreshClients(force = false): Promise<void> {
     });
     pendingApprovals.replaceChildren(...pending);
     pairedClients.replaceChildren(...clients);
+    cancelEdits.hidden = dirtyClients.size === 0;
     clientsStatus.textContent = `${clients.length} saved browsers · ${pending.length} pending approvals`;
     clientsStatus.dataset.error = "false";
   } catch (error) {
@@ -305,6 +322,22 @@ async function refreshClients(force = false): Promise<void> {
     clientsStatus.dataset.error = "true";
   } finally { clientsLoading = false; }
 }
+function markClientDirty(event: Event): void {
+  const target = event.target;
+  if (!(target instanceof HTMLElement)) return;
+  const row = target.closest<HTMLElement>(".paired-entry");
+  if (row?.dataset.clientId) {
+    dirtyClients.add(row.dataset.clientId);
+    cancelEdits.hidden = false;
+  }
+}
+pairedClients.addEventListener("input", markClientDirty);
+pairedClients.addEventListener("change", markClientDirty);
+cancelEdits.addEventListener("click", () => {
+  dirtyClients.clear();
+  cancelEdits.hidden = true;
+  void refreshClients(true);
+});
 setInterval(() => { void refreshClients(); }, 2000);
 document.addEventListener("visibilitychange", () => { if (document.visibilityState === "visible") void refreshClients(); });
 setInterval(updateExpiry, 1000);
