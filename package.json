@@ -1,10 +1,12 @@
 {
   "name": "local-file-drop",
   "private": true,
+  "license": "MIT",
   "scripts": {
     "build": "tsc",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "playwright test"
+    "test:e2e": "playwright test",
+    "screenshots": "npm run build && playwright test e2e/screenshots.spec.ts --project=chromium"
   },
   "devDependencies": {
     "typescript": "^5.9.3",
