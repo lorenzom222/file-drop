@@ -165,6 +165,10 @@ Source reviews and automated tests are not a guarantee of security. Avoid publis
 
 ## Development
 
+GitHub Actions [CI](.github/workflows/ci.yml) runs on pushes, pull requests, and manual dispatch. It uses a macOS runner for frontend type-check/build, Go race tests and vet, the executable build, and Chromium/Firefox/mobile-WebKit E2E tests. Failure diagnostics are retained for seven days.
+
+CI uses isolated local test receivers and dummy screenshot data, with no Tailscale account, production inbox, or pairing credentials. Actions are pinned to commit revisions and repository permissions are read-only.
+
 ```sh
 npm run build
 npm run typecheck
